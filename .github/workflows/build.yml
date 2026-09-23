@@ -1,0 +1,56 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Host unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests
+        run: make -C tests
+
+  firmware:
+    name: Firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup arm-none-eabi-gcc
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: '13.3.Rel1'
+
+      - name: Get libDaisy revision
+        id: libdaisy
+        run: echo "sha=$(git rev-parse HEAD:lib/libDaisy)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache libDaisy build
+        id: libdaisy-cache
+        uses: actions/cache@v4
+        with:
+          path: lib/libDaisy/build
+          key: libdaisy-${{ runner.os }}-13.3.Rel1-${{ steps.libdaisy.outputs.sha }}
+
+      - name: Build libDaisy
+        if: steps.libdaisy-cache.outputs.cache-hit != 'true'
+        run: make -C lib/libDaisy -j"$(nproc)"
+
+      - name: Build firmware
+        run: make -j"$(nproc)"
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: versio_reverse-${{ github.sha }}
+          path: |
+            build/versio_reverse.bin
+            build/versio_reverse.elf
+          if-no-files-found: error
