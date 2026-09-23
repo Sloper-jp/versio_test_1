@@ -1,6 +1,6 @@
 # versio_test_1 — Versio Reverse
 
-Noise Engineering Versio 用カスタムファームウエア。クロックに同期してピッチ変化なしで逆再生し、逆再生されたトランジェントをビートに合わせます。
+Noise Engineering Versio 用カスタムファームウエア。クロックに同期してピッチ変化なしで逆再生し、逆再生されたトランジェントをビートに合わせます。後段のコムフィルターで中高域に grit / shimmer とステレオの広がりを加えます。
 
 仕様: [docs/design.md](docs/design.md)
 
@@ -8,8 +8,10 @@ Noise Engineering Versio 用カスタムファームウエア。クロックに�
 
 | コントロール | 機能 |
 |---|---|
-| KNOB_0 ＋ CV | 50% 以上で REVERSE（Wet 100%）、未満で DRY（原音） |
-| KNOB_1 ＋ CV | トランジェント位置のオフセット −350〜+350ms（中央 0） |
+| KNOB_0 ＋ CV（左上） | 50% 以上で REVERSE（Wet 100%）、未満で DRY（原音） |
+| KNOB_1 ＋ CV（その下） | トランジェント位置のオフセット −350〜+350ms（中央 0） |
+| KNOB_2 ＋ CV | コムのミックス：0〜50% で Wet 0 → Dry と同じ大きさ、50〜100% でステレオ幅（左右のディレイ差 0 → 0.5ms） |
+| KNOB_3 ＋ CV | コムのディレイタイム 0.1〜8ms（指数カーブ） |
 | FSU ゲート入力 | クロック（2PPQN、BPM 50 以上） |
 
 | LED | 表示 |
@@ -39,7 +41,9 @@ make test              # PC 上の単体テスト
 
 公式ファームウエアへは Noise Engineering のアップデーターで戻せます。
 
-## 実機で確認が必要な点
+出力段にはソフトクリッパー（−3dBFS 付近から緩やかに飽和）が入っています。
 
-- `KNOB_0` / `KNOB_1` のパネル上の位置
-- ゲート入力の極性（クロックに合わせて LED1 が白く点滅しなければ `src/config.h` の `kGateInvert` を `true` に）
+## 実機で確認・調整する点
+
+- `KNOB_2` / `KNOB_3` のパネル上の位置
+- ステレオ幅の最大値 `kCombStereoSpreadMs`（`src/config.h`、既定 0.5ms。0.3〜1.0ms で聴き比べ）

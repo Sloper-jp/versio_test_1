@@ -4,6 +4,7 @@
 #include "daisy_versio.h"
 
 #include "clock_tracker.h"
+#include "comb_filter.h"
 #include "config.h"
 #include "controls.h"
 #include "reverse_engine.h"
@@ -25,6 +26,7 @@ ReverseEngine engine;
 ClockTracker  clock_tracker;
 ModeSwitch    mode_switch;
 OutputSwitch  output_switch;
+CombFilter    comb;
 
 // Shared with the main loop for the LEDs.
 volatile bool  led_reverse      = false;
@@ -47,6 +49,11 @@ void AudioCallback(AudioHandle::InputBuffer  in,
     const int32_t offset
         = static_cast<int32_t>(offset_ms * config::kSampleRate / 1000.f);
 
+    comb.SetMix(hw.GetKnobValue(DaisyVersio::KNOB_2));
+    comb.SetDelayMs(KnobToCombDelayMs(hw.GetKnobValue(DaisyVersio::KNOB_3),
+                                      config::kCombMinDelayMs,
+                                      config::kCombMaxDelayMs));
+
     for(size_t i = 0; i < size; i++)
     {
         const bool gate = hw.Gate() != config::kGateInvert;
@@ -64,8 +71,13 @@ void AudioCallback(AudioHandle::InputBuffer  in,
         engine.Process(in[0][i], in[1][i], &wet_l, &wet_r);
 
         output_switch.Tick(reverse);
-        out[0][i] = output_switch.Mix(in[0][i], wet_l);
-        out[1][i] = output_switch.Mix(in[1][i], wet_r);
+        const float sw_l = output_switch.Mix(in[0][i], wet_l);
+        const float sw_r = output_switch.Mix(in[1][i], wet_r);
+
+        float comb_l, comb_r;
+        comb.Process(sw_l, sw_r, &comb_l, &comb_r);
+        out[0][i] = SoftClip(comb_l, config::kSoftClipThreshold);
+        out[1][i] = SoftClip(comb_r, config::kSoftClipThreshold);
     }
 
     led_reverse   = reverse;
@@ -134,6 +146,15 @@ int main(void)
 
     mode_switch.Init(config::kModeOnThreshold, config::kModeOffThreshold);
     output_switch.Init(config::MsToSamples(config::kModeFadeMs));
+
+    CombFilter::Config comb_cfg;
+    comb_cfg.sample_rate          = config::kSampleRate;
+    comb_cfg.hpf_hz               = config::kCombHpfHz;
+    comb_cfg.stereo_spread_ms     = config::kCombStereoSpreadMs;
+    comb_cfg.min_channel_delay_ms = config::kCombMinChannelDelayMs;
+    comb_cfg.delay_smooth_ms      = config::kCombDelaySmoothMs;
+    comb_cfg.mix_smooth_ms        = config::kCombMixSmoothMs;
+    comb.Init(comb_cfg);
 
     hw.StartAdc();
     hw.StartAudio(AudioCallback);
