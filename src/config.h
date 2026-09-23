@@ -27,6 +27,18 @@ constexpr float kClockDefaultIntervalMs = 500.f; // BPM 60 @ 2PPQN, used before 
 constexpr float kClockDebounceMs        = 2.f;
 constexpr float kClockReanchorRatio     = 0.2f;
 
+// Comb filter (§3.7)
+constexpr float kCombMinDelayMs        = 0.1f;
+constexpr float kCombMaxDelayMs        = 8.f;
+constexpr float kCombHpfHz             = 500.f;
+constexpr float kCombStereoSpreadMs    = 0.5f; // Δmax, tune on hardware (0.3–1.0)
+constexpr float kCombMinChannelDelayMs = 0.05f;
+constexpr float kCombDelaySmoothMs     = 20.f;
+constexpr float kCombMixSmoothMs       = 5.f;
+
+// Output soft clipper (§3.7): linear below -3 dBFS
+constexpr float kSoftClipThreshold = 0.708f;
+
 // Gate input polarity. DaisyVersio::Gate() should already return true while
 // the jack is high; flip this if hardware testing shows otherwise.
 constexpr bool kGateInvert = false;

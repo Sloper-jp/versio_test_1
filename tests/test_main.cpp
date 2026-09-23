@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "clock_tracker.h"
+#include "comb_filter.h"
 #include "controls.h"
 #include "reverse_engine.h"
 
@@ -303,6 +304,205 @@ static void TestTransientAlignment(int32_t d)
     CHECK(ok);
 }
 
+// ----------------------------------------------------------------- comb ---
+
+static CombFilter MakeComb(float mix, float delay_ms)
+{
+    CombFilter::Config cfg;
+    cfg.sample_rate          = 48000.f;
+    cfg.hpf_hz               = 500.f;
+    cfg.stereo_spread_ms     = 0.5f;
+    cfg.min_channel_delay_ms = 0.05f;
+    cfg.delay_smooth_ms      = 20.f;
+    cfg.mix_smooth_ms        = 5.f;
+    CombFilter c;
+    c.Init(cfg);
+    c.SetMix(mix);
+    c.SetDelayMs(delay_ms);
+    c.SnapParameters();
+    return c;
+}
+
+// Reference: same biquad in double precision.
+static std::vector<double> RefHighPass(const std::vector<float>& x)
+{
+    const double w0 = 2.0 * M_PI * 500.0 / 48000.0, cw = std::cos(w0);
+    const double alpha = std::sin(w0) / (2.0 * std::sqrt(0.5)), a0 = 1.0 + alpha;
+    const double b0 = (1.0 + cw) / 2.0 / a0, b1 = -(1.0 + cw) / a0, b2 = b0;
+    const double a1 = -2.0 * cw / a0, a2 = (1.0 - alpha) / a0;
+    std::vector<double> y(x.size());
+    double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+    for(size_t n = 0; n < x.size(); n++)
+    {
+        y[n] = b0 * x[n] + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+        x2 = x1; x1 = x[n]; y2 = y1; y1 = y[n];
+    }
+    return y;
+}
+
+static std::vector<float> Noise(size_t n)
+{
+    std::vector<float> x(n);
+    uint32_t           r = 12345;
+    for(auto& v : x)
+    {
+        r = r * 1664525u + 1013904223u;
+        v = (static_cast<float>(r >> 8) / 16777216.f - 0.5f);
+    }
+    return x;
+}
+
+// Runs the comb and compares with y = l + g (h + w h(n - D)) computed from
+// the reference high-pass, for integer delays D (exact through Hermite).
+static double CombError(float mix, float delay_ms, int dl, int dr, double w)
+{
+    CombFilter c = MakeComb(mix, delay_ms);
+    auto       x = Noise(2000);
+    auto       h = RefHighPass(x);
+    const double g = 1.0 / std::sqrt(1.0 + w * w);
+    double err = 0;
+    for(size_t n = 0; n < x.size(); n++)
+    {
+        float yl, yr;
+        c.Process(x[n], x[n], &yl, &yr);
+        const double hl = n >= size_t(dl) ? h[n - dl] : 0.0;
+        const double hr = n >= size_t(dr) ? h[n - dr] : 0.0;
+        const double el = (x[n] - h[n]) + g * (h[n] + w * hl);
+        const double er = (x[n] - h[n]) + g * (h[n] + w * hr);
+        err = std::fmax(err, std::fmax(std::fabs(yl - el), std::fabs(yr - er)));
+    }
+    return err;
+}
+
+static void TestCombBypassAtZero()
+{
+    CombFilter c = MakeComb(0.f, 3.f);
+    auto       x = Noise(2000);
+    double     err = 0;
+    for(float v : x)
+    {
+        float yl, yr;
+        c.Process(v, -v, &yl, &yr);
+        err = std::fmax(err, std::fmax(std::fabs(yl - v), std::fabs(yr + v)));
+    }
+    CHECK(err < 1e-6); // 0%: dry 100%
+}
+
+static void TestCombHalfMix()
+{
+    // 50%: w = 1, same delay both sides (1 ms = 48 samples)
+    CHECK(CombError(0.5f, 1.f, 48, 48, 1.0) < 1e-4);
+    // 25%: w = 0.5
+    CHECK(CombError(0.25f, 1.f, 48, 48, 0.5) < 1e-4);
+}
+
+static void TestCombStereoSpread()
+{
+    // 100%: w = 1, L/R = 1 ms -/+ 0.25 ms = 36 / 60 samples
+    CHECK(CombError(1.f, 1.f, 36, 60, 1.0) < 1e-4);
+    // 75%: spread halved -> 42 / 54
+    CHECK(CombError(0.75f, 1.f, 42, 54, 1.0) < 1e-4);
+}
+
+static void TestCombFractionalDelay()
+{
+    // 10.5 samples through Hermite interpolation, checked with a sine
+    // at 1 kHz: the 10.5-sample result must lie halfway between 10 and 11).
+    const float delay_ms = 10.5f / 48.f;
+    CombFilter  a = MakeComb(0.5f, delay_ms);
+    CombFilter  b = MakeComb(0.5f, 10.f / 48.f);
+    CombFilter  d = MakeComb(0.5f, 11.f / 48.f);
+    double      max_ab = 0, max_between = 0;
+    for(int n = 0; n < 4000; n++)
+    {
+        const float x = std::sin(2.f * 3.14159265f * 1000.f * n / 48000.f);
+        float ya, yb, yd, t;
+        a.Process(x, x, &ya, &t);
+        b.Process(x, x, &yb, &t);
+        d.Process(x, x, &yd, &t);
+        if(n > 2000)
+        {
+            // Output with 10.5 must sit between (≈ average of) 10 and 11.
+            max_between = std::fmax(max_between, std::fabs(ya - 0.5 * (yb + yd)));
+            max_ab      = std::fmax(max_ab, std::fabs(ya));
+        }
+    }
+    CHECK(max_ab > 0.1);
+    CHECK(max_between < 0.01);
+}
+
+static void TestCombLowBandUntouched()
+{
+    // 60 Hz sine at 50% mix: level stays within 0.5 dB of the input.
+    CombFilter c = MakeComb(0.5f, 2.f);
+    double     in_pk = 0, out_pk = 0;
+    for(int n = 0; n < 48000; n++)
+    {
+        const float x = 0.5f * std::sin(2.f * 3.14159265f * 60.f * n / 48000.f);
+        float yl, yr;
+        c.Process(x, x, &yl, &yr);
+        if(n > 24000)
+        {
+            in_pk  = std::fmax(in_pk, std::fabs(x));
+            out_pk = std::fmax(out_pk, std::fabs(yl));
+        }
+    }
+    CHECK(std::fabs(20.0 * std::log10(out_pk / in_pk)) < 0.5);
+}
+
+static void TestCombPeakBound()
+{
+    // Worst case at 50%: a high-band comb peak (1 ms delay -> peaks every
+    // 1 kHz) is +3 dB, not +6 dB.
+    CombFilter c = MakeComb(0.5f, 1.f);
+    double     pk = 0;
+    for(int n = 0; n < 48000; n++)
+    {
+        const float x = 0.5f * std::sin(2.f * 3.14159265f * 4000.f * n / 48000.f);
+        float yl, yr;
+        c.Process(x, x, &yl, &yr);
+        if(n > 24000)
+            pk = std::fmax(pk, std::fabs(yl));
+    }
+    const double db = 20.0 * std::log10(pk / 0.5);
+    CHECK(db > 2.5 && db < 3.3);
+}
+
+static void TestCombDelaySmoothing()
+{
+    CombFilter c = MakeComb(0.5f, 0.1f);
+    c.SetDelayMs(8.f); // big jump must not produce spikes
+    auto   x  = Noise(9600);
+    double pk = 0;
+    for(float v : x)
+    {
+        float yl, yr;
+        c.Process(0.3f * v, 0.3f * v, &yl, &yr);
+        pk = std::fmax(pk, std::fabs(yl));
+    }
+    CHECK(pk < 0.5);
+}
+
+static void TestSoftClip()
+{
+    CHECK(SoftClip(0.5f, 0.708f) == 0.5f);
+    CHECK(SoftClip(-0.708f, 0.708f) == -0.708f);
+    CHECK(SoftClip(10.f, 0.708f) <= 1.f);
+    CHECK(SoftClip(-10.f, 0.708f) >= -1.f);
+    CHECK(SoftClip(1.f, 0.708f) > 0.708f);
+    // Continuous slope at the threshold
+    const float e = 1e-3f;
+    CHECK(std::fabs((SoftClip(0.708f + e, 0.708f) - 0.708f) / e - 1.f) < 0.01f);
+}
+
+static void TestCombDelayKnob()
+{
+    CHECK(std::fabs(KnobToCombDelayMs(0.f, 0.1f, 8.f) - 0.1f) < 1e-6f);
+    CHECK(std::fabs(KnobToCombDelayMs(1.f, 0.1f, 8.f) - 8.f) < 1e-4f);
+    CHECK(std::fabs(KnobToCombDelayMs(0.5f, 0.1f, 8.f) - 0.894427f) < 1e-4f);
+    CHECK(KnobToCombDelayMs(1.5f, 0.1f, 8.f) <= 8.0001f);
+}
+
 // ------------------------------------------------------------- controls ---
 
 static void TestModeSwitchHysteresis()
@@ -360,6 +560,15 @@ int main()
     TestTransientAlignment(0);
     TestTransientAlignment(30);
     TestTransientAlignment(-30);
+    TestCombBypassAtZero();
+    TestCombHalfMix();
+    TestCombStereoSpread();
+    TestCombFractionalDelay();
+    TestCombLowBandUntouched();
+    TestCombPeakBound();
+    TestCombDelaySmoothing();
+    TestSoftClip();
+    TestCombDelayKnob();
     TestModeSwitchHysteresis();
     TestOffsetKnob();
     TestOutputSwitchFade();
