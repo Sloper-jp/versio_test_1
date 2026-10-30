@@ -52,6 +52,25 @@ inline float KnobToCombDelayMs(float v, float min_ms, float max_ms)
     return min_ms * powf(max_ms / min_ms, v);
 }
 
+// Knob 0..1 -> level with a squared curve (50% = -12 dB), silent at the bottom.
+inline float KnobToLevel(float v, float dead_zone)
+{
+    if(v <= dead_zone)
+        return 0.f;
+    v = v > 1.f ? 1.f : v;
+    return v * v;
+}
+
+// Knob 0..1 -> feedback, reaching exactly 0 and 1 at both ends.
+inline float KnobToFeedback(float v, float dead_zone)
+{
+    if(v <= dead_zone)
+        return 0.f;
+    if(v >= 1.f - dead_zone)
+        return 1.f;
+    return (v - dead_zone) / (1.f - 2.f * dead_zone);
+}
+
 // Dry/wet selector with a short linear fade so the switch does not click.
 class OutputSwitch
 {

@@ -8,6 +8,7 @@
 #include "config.h"
 #include "controls.h"
 #include "reverse_engine.h"
+#include "send_delay.h"
 
 using namespace daisy;
 
@@ -15,18 +16,46 @@ namespace
 {
 constexpr size_t kBufferLen
     = static_cast<size_t>(config::kBufferSeconds * config::kSampleRate);
+constexpr size_t kDelayLineLen
+    = static_cast<size_t>(config::kDelayLineSeconds * config::kSampleRate);
 constexpr uint32_t kClockFlashMs = 30;
 
 DaisyVersio hw;
 
 DSY_SDRAM_BSS float buffer_l[kBufferLen];
 DSY_SDRAM_BSS float buffer_r[kBufferLen];
+DSY_SDRAM_BSS float delay_line_0[kDelayLineLen];
+DSY_SDRAM_BSS float delay_line_1[kDelayLineLen];
+DSY_SDRAM_BSS float delay_line_2[kDelayLineLen];
 
 ReverseEngine engine;
 ClockTracker  clock_tracker;
 ModeSwitch    mode_switch;
 OutputSwitch  output_switch;
 CombFilter    comb;
+SendDelay     send_delay;
+
+// SW_0: delay time in clock intervals (2PPQN: one interval = an 8th note).
+float DelayIntervals()
+{
+    switch(hw.sw[DaisyVersio::SW_0].Read())
+    {
+        case Switch3::POS_UP: return 1.5f;   // dotted 8th
+        case Switch3::POS_DOWN: return 0.5f; // 16th
+        default: return 1.f;                 // 8th
+    }
+}
+
+// SW_1: panning pattern.
+SendDelay::Pattern DelayPattern()
+{
+    switch(hw.sw[DaisyVersio::SW_1].Read())
+    {
+        case Switch3::POS_UP: return SendDelay::Pattern::Center;
+        case Switch3::POS_DOWN: return SendDelay::Pattern::LeftLeftRight;
+        default: return SendDelay::Pattern::LeftRight;
+    }
+}
 
 // Shared with the main loop for the LEDs.
 volatile bool  led_reverse      = false;
@@ -40,6 +69,7 @@ void AudioCallback(AudioHandle::InputBuffer  in,
                    size_t                    size)
 {
     hw.ProcessAllControls();
+    hw.tap.Debounce();
 
     const bool reverse
         = mode_switch.Process(hw.GetKnobValue(DaisyVersio::KNOB_0));
@@ -53,6 +83,19 @@ void AudioCallback(AudioHandle::InputBuffer  in,
     comb.SetDelayMs(KnobToCombDelayMs(hw.GetKnobValue(DaisyVersio::KNOB_3),
                                       config::kCombMinDelayMs,
                                       config::kCombMaxDelayMs));
+
+    // The FSU button throws the input into the delay at 0 dB while held.
+    send_delay.SetSend(hw.SwitchPressed()
+                           ? 1.f
+                           : KnobToLevel(hw.GetKnobValue(DaisyVersio::KNOB_4),
+                                         config::kDelayKnobDeadZone));
+    send_delay.SetReturn(KnobToLevel(hw.GetKnobValue(DaisyVersio::KNOB_5),
+                                     config::kDelayKnobDeadZone));
+    send_delay.SetFeedback(KnobToFeedback(hw.GetKnobValue(DaisyVersio::KNOB_6),
+                                          config::kDelayKnobDeadZone));
+    send_delay.SetDelaySamples(static_cast<uint32_t>(
+        static_cast<float>(clock_tracker.Interval()) * DelayIntervals()));
+    send_delay.SetPattern(DelayPattern());
 
     for(size_t i = 0; i < size; i++)
     {
@@ -76,8 +119,12 @@ void AudioCallback(AudioHandle::InputBuffer  in,
 
         float comb_l, comb_r;
         comb.Process(sw_l, sw_r, &comb_l, &comb_r);
-        out[0][i] = SoftClip(comb_l, config::kSoftClipThreshold);
-        out[1][i] = SoftClip(comb_r, config::kSoftClipThreshold);
+
+        float ret_l, ret_r;
+        send_delay.Process(comb_l, comb_r, &ret_l, &ret_r);
+
+        out[0][i] = SoftClip(comb_l + ret_l, config::kSoftClipThreshold);
+        out[1][i] = SoftClip(comb_r + ret_r, config::kSoftClipThreshold);
     }
 
     led_reverse   = reverse;
@@ -156,6 +203,18 @@ int main(void)
     comb_cfg.delay_smooth_ms      = config::kCombDelaySmoothMs;
     comb_cfg.mix_smooth_ms        = config::kCombMixSmoothMs;
     comb.Init(comb_cfg);
+
+    SendDelay::Config delay_cfg;
+    delay_cfg.sample_rate     = config::kSampleRate;
+    delay_cfg.line_len        = kDelayLineLen;
+    delay_cfg.level_smooth_ms = config::kDelayLevelSmoothMs;
+    delay_cfg.time_fade_ms    = config::kDelayTimeFadeMs;
+    delay_cfg.route_fade_ms   = config::kDelayRouteFadeMs;
+    delay_cfg.time_tolerance  = config::kDelayTimeTolerance;
+    delay_cfg.dc_cut_hz       = config::kDelayDcCutHz;
+    delay_cfg.loop_clip       = config::kDelayLoopClip;
+    send_delay.Init(delay_cfg, delay_line_0, delay_line_1, delay_line_2);
+    send_delay.Snap(config::MsToSamples(config::kClockDefaultIntervalMs));
 
     hw.StartAdc();
     hw.StartAudio(AudioCallback);

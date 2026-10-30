@@ -37,6 +37,16 @@ constexpr float kCombMinChannelDelayMs = 0.05f;
 constexpr float kCombDelaySmoothMs     = 20.f;
 constexpr float kCombMixSmoothMs       = 5.f;
 
+// Send delay (§3.8)
+constexpr float kDelayLineSeconds     = 1.0f; // longest delay is 900 ms
+constexpr float kDelayKnobDeadZone    = 0.02f;
+constexpr float kDelayLevelSmoothMs   = 5.f;
+constexpr float kDelayTimeFadeMs      = 20.f;
+constexpr float kDelayRouteFadeMs     = 10.f;
+constexpr float kDelayTimeTolerance   = 0.01f;
+constexpr float kDelayDcCutHz         = 5.f;
+constexpr float kDelayLoopClip        = 0.891f; // -1 dBFS
+
 // Output soft clipper (§3.7): linear below -3 dBFS
 constexpr float kSoftClipThreshold = 0.708f;
 

@@ -8,6 +8,7 @@
 #include "comb_filter.h"
 #include "controls.h"
 #include "reverse_engine.h"
+#include "send_delay.h"
 
 static int failures = 0;
 
@@ -561,6 +562,197 @@ static void TestCombDelayKnob()
     CHECK(KnobToCombDelayMs(1.5f, 0.1f, 8.f) <= 8.0001f);
 }
 
+// ----------------------------------------------------------- send delay ---
+
+struct DelayFixture
+{
+    std::vector<float> a, b, c;
+    SendDelay          d;
+
+    DelayFixture(float fb, SendDelay::Pattern p, uint32_t delay = 100)
+    : a(4800), b(4800), c(4800)
+    {
+        SendDelay::Config cfg;
+        cfg.sample_rate     = 48000.f;
+        cfg.line_len        = 4800;
+        cfg.level_smooth_ms = 5.f;
+        cfg.time_fade_ms    = 20.f;
+        cfg.route_fade_ms   = 10.f;
+        cfg.time_tolerance  = 0.01f;
+        cfg.dc_cut_hz       = 5.f;
+        cfg.loop_clip       = 0.891f;
+        d.Init(cfg, a.data(), b.data(), c.data());
+        d.SetSend(1.f);
+        d.SetReturn(1.f);
+        d.SetFeedback(fb);
+        d.SetPattern(p);
+        d.Snap(delay);
+        // Let the route fade settle on silence.
+        float l, r;
+        for(int i = 0; i < 1000; i++)
+            d.Process(0.f, 0.f, &l, &r);
+    }
+
+    // Sends one impulse and records the return.
+    void Impulse(float il, float ir, int n, std::vector<float>& l, std::vector<float>& r)
+    {
+        l.resize(n);
+        r.resize(n);
+        for(int i = 0; i < n; i++)
+            d.Process(i == 0 ? il : 0.f, i == 0 ? ir : 0.f, &l[i], &r[i]);
+    }
+};
+
+static bool Near(float a, float b, float tol = 0.01f)
+{
+    return std::fabs(a - b) < tol;
+}
+
+static void TestDelayCenterKeepsStereo()
+{
+    DelayFixture f(0.5f, SendDelay::Pattern::Center);
+    std::vector<float> l, r;
+    f.Impulse(0.8f, 0.4f, 350, l, r);
+    CHECK(Near(l[100], 0.8f) && Near(r[100], 0.4f));
+    CHECK(Near(l[200], 0.4f) && Near(r[200], 0.2f));
+    CHECK(Near(l[300], 0.2f) && Near(r[300], 0.1f));
+}
+
+static void TestDelayLeftRight()
+{
+    DelayFixture f(0.5f, SendDelay::Pattern::LeftRight);
+    std::vector<float> l, r;
+    f.Impulse(0.8f, 0.f, 350, l, r); // mono sum = 0.4
+    CHECK(Near(l[100], 0.4f) && Near(r[100], 0.f));
+    CHECK(Near(l[200], 0.f) && Near(r[200], 0.2f));
+    CHECK(Near(l[300], 0.1f) && Near(r[300], 0.f));
+}
+
+static void TestDelayLeftLeftRight()
+{
+    DelayFixture f(0.5f, SendDelay::Pattern::LeftLeftRight);
+    std::vector<float> l, r;
+    f.Impulse(0.8f, 0.8f, 450, l, r); // mono sum = 0.8
+    CHECK(Near(l[100], 0.8f) && Near(r[100], 0.f));
+    CHECK(Near(l[200], 0.4f) && Near(r[200], 0.f));
+    CHECK(Near(l[300], 0.f) && Near(r[300], 0.2f));
+    CHECK(Near(l[400], 0.1f) && Near(r[400], 0.f));
+}
+
+static void TestDelayNoFeedbackSingleRepeat()
+{
+    DelayFixture f(0.f, SendDelay::Pattern::LeftRight);
+    std::vector<float> l, r;
+    f.Impulse(0.8f, 0.8f, 400, l, r);
+    CHECK(Near(l[100], 0.8f));
+    CHECK(Near(r[200], 0.f) && Near(l[300], 0.f));
+}
+
+static void TestDelayTailSurvivesSendDown()
+{
+    DelayFixture f(0.5f, SendDelay::Pattern::Center);
+    std::vector<float> l, r;
+    f.Impulse(0.8f, 0.8f, 50, l, r);
+    f.d.SetSend(0.f); // tail keeps playing after the send is closed
+    f.Impulse(0.f, 0.f, 200, l, r);
+    CHECK(Near(l[50], 0.8f));
+    CHECK(Near(l[150], 0.4f));
+}
+
+static void TestDelayFullFeedbackHolds()
+{
+    DelayFixture f(1.f, SendDelay::Pattern::LeftRight, 100);
+    std::vector<float> l, r;
+    f.Impulse(0.5f, 0.5f, 48000, l, r);
+    // Repeats do not decay over a second.
+    CHECK(Near(l[100], 0.5f) && Near(r[200], 0.5f));
+    CHECK(Near(l[47900], 0.5f));
+}
+
+static void TestDelayFullFeedbackStaysBounded()
+{
+    DelayFixture f(1.f, SendDelay::Pattern::Center, 100);
+    auto         x  = Noise(48000);
+    double       pk = 0;
+    for(float v : x)
+    {
+        float l, r;
+        f.d.Process(v * 1.5f, v * 1.5f, &l, &r);
+        pk = std::fmax(pk, std::fabs(l));
+    }
+    CHECK(pk <= 1.0);
+}
+
+static void TestDelayDcDoesNotAccumulate()
+{
+    DelayFixture f(1.f, SendDelay::Pattern::Center, 4000);
+    float        l = 0, r = 0;
+    // Constant input: only the first moments get through the DC cut, so the
+    // loop stays far below the clipper instead of integrating up to it.
+    double peak_late = 0;
+    for(int n = 0; n < 480000; n++)
+    {
+        f.d.Process(0.05f, 0.05f, &l, &r);
+        if(n > 470000)
+            peak_late = std::fmax(peak_late, std::fabs(l));
+    }
+    CHECK(peak_late < 0.06);
+}
+
+static void TestDelayTimeChange()
+{
+    // Within tolerance: ignored.
+    DelayFixture f(0.f, SendDelay::Pattern::Center, 1000);
+    f.d.SetDelaySamples(1005);
+    float l, r;
+    f.d.Process(0.f, 0.f, &l, &r);
+    CHECK(f.d.Delay() == 1000);
+    // Beyond tolerance: follows.
+    f.d.SetDelaySamples(500);
+    f.d.Process(0.f, 0.f, &l, &r);
+    CHECK(f.d.Delay() == 500);
+    // Longer than the line: clamped.
+    f.d.SetDelaySamples(100000);
+    for(int i = 0; i < 2000; i++)
+        f.d.Process(0.f, 0.f, &l, &r);
+    CHECK(f.d.Delay() == 4799);
+}
+
+// A 200 Hz sine through the delay must not jump when the delay time or the
+// pattern changes. One sample of the sine moves at most about 0.026 * amp.
+static void TestDelayChangesDoNotClick()
+{
+    DelayFixture f(0.5f, SendDelay::Pattern::Center, 1000);
+    float        prev_l = 0, prev_r = 0, max_step = 0;
+    for(int n = 0; n < 24000; n++)
+    {
+        if(n == 8000)
+            f.d.SetDelaySamples(2000);
+        if(n == 16000)
+            f.d.SetPattern(SendDelay::Pattern::LeftLeftRight);
+        const float x = 0.2f * std::sin(2.f * 3.14159265f * 200.f * n / 48000.f);
+        float       l, r;
+        f.d.Process(x, x, &l, &r);
+        if(n > 4000)
+            max_step = std::fmax(max_step,
+                                 std::fmax(std::fabs(l - prev_l), std::fabs(r - prev_r)));
+        prev_l = l;
+        prev_r = r;
+    }
+    CHECK(max_step < 0.05f);
+}
+
+static void TestDelayKnobs()
+{
+    CHECK(KnobToLevel(0.f, 0.02f) == 0.f);
+    CHECK(KnobToLevel(0.02f, 0.02f) == 0.f);
+    CHECK(Near(KnobToLevel(0.5f, 0.02f), 0.25f, 1e-6f)); // -12 dB
+    CHECK(KnobToLevel(1.f, 0.02f) == 1.f);
+    CHECK(KnobToFeedback(0.01f, 0.02f) == 0.f);
+    CHECK(KnobToFeedback(0.99f, 0.02f) == 1.f);
+    CHECK(Near(KnobToFeedback(0.5f, 0.02f), 0.5f, 1e-6f));
+}
+
 // ------------------------------------------------------------- controls ---
 
 static void TestModeSwitchHysteresis()
@@ -629,6 +821,17 @@ int main()
     TestCombFeedbackDecaysAndStaysStable();
     TestSoftClip();
     TestCombDelayKnob();
+    TestDelayCenterKeepsStereo();
+    TestDelayLeftRight();
+    TestDelayLeftLeftRight();
+    TestDelayNoFeedbackSingleRepeat();
+    TestDelayTailSurvivesSendDown();
+    TestDelayFullFeedbackHolds();
+    TestDelayFullFeedbackStaysBounded();
+    TestDelayDcDoesNotAccumulate();
+    TestDelayTimeChange();
+    TestDelayChangesDoNotClick();
+    TestDelayKnobs();
     TestModeSwitchHysteresis();
     TestOffsetKnob();
     TestOutputSwitchFade();
