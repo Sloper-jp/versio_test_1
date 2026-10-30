@@ -46,4 +46,5 @@ make test              # PC 上の単体テスト
 ## 実機で確認・調整する点
 
 - `KNOB_2` / `KNOB_3` のパネル上の位置
+- コムのフィードバック量 `kCombFeedback`（`src/config.h`、既定 +0.6。0.5〜0.7 で聴き比べ）
 - ステレオ幅の最大値 `kCombStereoSpreadMs`（`src/config.h`、既定 0.5ms。0.3〜1.0ms で聴き比べ）

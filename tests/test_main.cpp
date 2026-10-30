@@ -306,12 +306,13 @@ static void TestTransientAlignment(int32_t d)
 
 // ----------------------------------------------------------------- comb ---
 
-static CombFilter MakeComb(float mix, float delay_ms)
+static CombFilter MakeComb(float mix, float delay_ms, float feedback = 0.6f)
 {
     CombFilter::Config cfg;
     cfg.sample_rate          = 48000.f;
     cfg.hpf_hz               = 500.f;
     cfg.stereo_spread_ms     = 0.5f;
+    cfg.feedback             = feedback;
     cfg.min_channel_delay_ms = 0.05f;
     cfg.delay_smooth_ms      = 20.f;
     cfg.mix_smooth_ms        = 5.f;
@@ -352,21 +353,25 @@ static std::vector<float> Noise(size_t n)
     return x;
 }
 
-// Runs the comb and compares with y = l + g (h + w h(n - D)) computed from
-// the reference high-pass, for integer delays D (exact through Hermite).
+// Runs the comb and compares with the design equations computed from the
+// reference high-pass, for integer delays D (exact through Hermite).
 static double CombError(float mix, float delay_ms, int dl, int dr, double w)
 {
-    CombFilter c = MakeComb(mix, delay_ms);
-    auto       x = Noise(2000);
-    auto       h = RefHighPass(x);
-    const double g = 1.0 / std::sqrt(1.0 + w * w);
+    const double fb = 0.6;
+    CombFilter   c  = MakeComb(mix, delay_ms);
+    auto         x  = Noise(2000);
+    auto         h  = RefHighPass(x);
+    const double g  = 1.0 / std::sqrt(1.0 + w * w / (1.0 - fb * fb));
+    std::vector<double> ll(x.size()), lr(x.size());
     double err = 0;
     for(size_t n = 0; n < x.size(); n++)
     {
         float yl, yr;
         c.Process(x[n], x[n], &yl, &yr);
-        const double hl = n >= size_t(dl) ? h[n - dl] : 0.0;
-        const double hr = n >= size_t(dr) ? h[n - dr] : 0.0;
+        const double hl = n >= size_t(dl) ? ll[n - dl] : 0.0;
+        const double hr = n >= size_t(dr) ? lr[n - dr] : 0.0;
+        ll[n]           = h[n] + fb * hl;
+        lr[n]           = h[n] + fb * hr;
         const double el = (x[n] - h[n]) + g * (h[n] + w * hl);
         const double er = (x[n] - h[n]) + g * (h[n] + w * hr);
         err = std::fmax(err, std::fmax(std::fabs(yl - el), std::fabs(yr - er)));
@@ -452,8 +457,8 @@ static void TestCombLowBandUntouched()
 
 static void TestCombPeakBound()
 {
-    // Worst case at 50%: a high-band comb peak (1 ms delay -> peaks every
-    // 1 kHz) is +3 dB, not +6 dB.
+    // At 50% with feedback 0.6, a comb peak (1 ms delay -> peaks every 1 kHz)
+    // is about +6.8 dB.
     CombFilter c = MakeComb(0.5f, 1.f);
     double     pk = 0;
     for(int n = 0; n < 48000; n++)
@@ -465,7 +470,60 @@ static void TestCombPeakBound()
             pk = std::fmax(pk, std::fabs(yl));
     }
     const double db = 20.0 * std::log10(pk / 0.5);
-    CHECK(db > 2.5 && db < 3.3);
+    CHECK(db > 6.3 && db < 7.3);
+}
+
+static double CombToneDb(float feedback, float hz)
+{
+    CombFilter c = MakeComb(0.5f, 1.f, feedback);
+    double     pk = 0;
+    for(int n = 0; n < 48000; n++)
+    {
+        const float x = 0.25f * std::sin(2.f * 3.14159265f * hz * n / 48000.f);
+        float yl, yr;
+        c.Process(x, x, &yl, &yr);
+        if(n > 24000)
+            pk = std::fmax(pk, std::fabs(yl));
+    }
+    return 20.0 * std::log10(pk / 0.25);
+}
+
+static void TestCombFeedbackResponse()
+{
+    // No feedback: peak +3 dB. Feedback 0.6: notch about -11.4 dB at 4.5 kHz
+    // (slightly above the high-band-only -12.6 dB because l = x - h still
+    // leaks a little at high frequencies).
+    const double peak0 = CombToneDb(0.f, 4000.f);
+    CHECK(peak0 > 2.5 && peak0 < 3.3);
+    const double notch = CombToneDb(0.6f, 4500.f);
+    CHECK(notch > -12.0 && notch < -10.8);
+}
+
+static void TestCombFeedbackDecaysAndStaysStable()
+{
+    // Worst case for stability: fractional delays at both extremes and full
+    // spread. Noise must stay bounded and the tail must die out.
+    const float delays[] = {0.1f, 0.123f, 1.01f, 8.f};
+    for(float delay : delays)
+    {
+        CombFilter c  = MakeComb(1.f, delay);
+        auto       x  = Noise(48000);
+        double     pk = 0, tail = 0;
+        float      yl, yr;
+        for(float v : x)
+        {
+            c.Process(v, v, &yl, &yr);
+            pk = std::fmax(pk, std::fmax(std::fabs(yl), std::fabs(yr)));
+        }
+        for(int n = 0; n < 48000; n++)
+        {
+            c.Process(0.f, 0.f, &yl, &yr);
+            if(n > 24000)
+                tail = std::fmax(tail, std::fmax(std::fabs(yl), std::fabs(yr)));
+        }
+        CHECK(pk < 3.0);
+        CHECK(tail < 1e-4);
+    }
 }
 
 static void TestCombDelaySmoothing()
@@ -567,6 +625,8 @@ int main()
     TestCombLowBandUntouched();
     TestCombPeakBound();
     TestCombDelaySmoothing();
+    TestCombFeedbackResponse();
+    TestCombFeedbackDecaysAndStaysStable();
     TestSoftClip();
     TestCombDelayKnob();
     TestModeSwitchHysteresis();

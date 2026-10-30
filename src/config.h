@@ -32,6 +32,7 @@ constexpr float kCombMinDelayMs        = 0.1f;
 constexpr float kCombMaxDelayMs        = 8.f;
 constexpr float kCombHpfHz             = 500.f;
 constexpr float kCombStereoSpreadMs    = 0.5f; // Δmax, tune on hardware (0.3–1.0)
+constexpr float kCombFeedback          = 0.6f; // fixed, tune on hardware (0.5–0.7)
 constexpr float kCombMinChannelDelayMs = 0.05f;
 constexpr float kCombDelaySmoothMs     = 20.f;
 constexpr float kCombMixSmoothMs       = 5.f;

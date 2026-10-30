@@ -151,6 +151,7 @@ int main(void)
     comb_cfg.sample_rate          = config::kSampleRate;
     comb_cfg.hpf_hz               = config::kCombHpfHz;
     comb_cfg.stereo_spread_ms     = config::kCombStereoSpreadMs;
+    comb_cfg.feedback             = config::kCombFeedback;
     comb_cfg.min_channel_delay_ms = config::kCombMinChannelDelayMs;
     comb_cfg.delay_smooth_ms      = config::kCombDelaySmoothMs;
     comb_cfg.mix_smooth_ms        = config::kCombMixSmoothMs;

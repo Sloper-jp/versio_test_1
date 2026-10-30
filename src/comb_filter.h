@@ -3,11 +3,11 @@
 #include <cstddef>
 #include <cstdint>
 
-// Feed-forward comb on the high band (docs/design.md §3.7). Hardware
-// independent.
+// Feedback comb on the high band (docs/design.md §3.7). Hardware independent.
 //
 //     h = HPF(x),  l = x - h
-//     y = l + g * (h + w * h(t - tau_ch)),   g = 1 / sqrt(1 + w^2)
+//     d = line(t - tau_ch),  line(t) = h + fb * d
+//     y = l + g * (h + w * d),   g = 1 / sqrt(1 + w^2 / (1 - fb^2))
 //
 // Mix m (0..1): w = 0 -> 1 over 0..50%, stereo spread s = 0 -> 1 over 50..100%.
 class CombFilter
@@ -18,6 +18,7 @@ class CombFilter
         float sample_rate;
         float hpf_hz;
         float stereo_spread_ms;   // Δmax: L/R difference at 100%
+        float feedback;           // fixed, |feedback| < 1
         float min_channel_delay_ms;
         float delay_smooth_ms;
         float mix_smooth_ms;
@@ -40,6 +41,9 @@ class CombFilter
         b2_               = b0_;
         a1_               = -2.f * cw / a0;
         a2_               = (1.f - alpha) / a0;
+
+        // Power of the feedback path relative to its input (geometric series).
+        wet_power_ = 1.f / (1.f - cfg.feedback * cfg.feedback);
 
         delay_coef_ = SmoothCoef(cfg.delay_smooth_ms);
         mix_coef_   = SmoothCoef(cfg.mix_smooth_ms);
@@ -80,7 +84,7 @@ class CombFilter
         s_ += (s_target_ - s_) * mix_coef_;
         tau_ += (tau_target_ - tau_) * delay_coef_;
 
-        const float g      = 1.f / sqrtf(1.f + w_ * w_);
+        const float g      = 1.f / sqrtf(1.f + w_ * w_ * wet_power_);
         const float half   = 0.5f * s_ * cfg_.stereo_spread_ms * ms_to_samples_;
         const float min_d  = cfg_.min_channel_delay_ms * ms_to_samples_;
         const float tau_l  = tau_ - half < min_d ? min_d : tau_ - half;
@@ -100,12 +104,15 @@ class CombFilter
         z1_[ch]       = b1_ * x - a1_ * h + z2_[ch];
         z2_[ch]       = b2_ * x - a2_ * h;
 
-        line_[ch][write_] = h;
-        const float hd    = ReadHermite(line_[ch], delay);
-        return (x - h) + g * (h + w_ * hd);
+        // Read first: the delay is at least 2 samples, so the read never
+        // touches the sample written below.
+        const float d     = ReadHermite(line_[ch], delay);
+        line_[ch][write_] = h + cfg_.feedback * d;
+        return (x - h) + g * (h + w_ * d);
     }
 
-    // Fractional delay read (delay >= 1 sample so the newer neighbour exists).
+    // Fractional delay read (delay >= 2 samples so the newer neighbour is
+    // already written).
     float ReadHermite(const float* buf, float delay) const
     {
         const int32_t k    = static_cast<int32_t>(delay);
@@ -135,6 +142,7 @@ class CombFilter
     float  z1_[2], z2_[2];
     float  line_[2][kDelayLen];
     size_t write_;
+    float  wet_power_;
     float  delay_coef_, mix_coef_;
     float  w_target_, s_target_, tau_target_;
     float  w_, s_, tau_;
