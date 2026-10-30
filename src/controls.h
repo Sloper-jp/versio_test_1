@@ -1,4 +1,5 @@
 #pragma once
+#include <cmath>
 #include <cstddef>
 
 // Knob/CV -> parameter conversion and the dry/wet switch (docs/design.md
@@ -42,6 +43,13 @@ inline float KnobToOffsetMs(float v, float max_ms, float dead_zone)
     if(x > 1.f)
         x = 1.f;
     return (u < 0.f ? -x : x) * max_ms;
+}
+
+// Knob 0..1 -> comb delay in ms on an exponential curve (min at 0, max at 1).
+inline float KnobToCombDelayMs(float v, float min_ms, float max_ms)
+{
+    v = v < 0.f ? 0.f : v > 1.f ? 1.f : v;
+    return min_ms * powf(max_ms / min_ms, v);
 }
 
 // Dry/wet selector with a short linear fade so the switch does not click.
