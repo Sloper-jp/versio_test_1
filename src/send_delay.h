@@ -170,6 +170,7 @@ class SendDelay
                 out.r        = read[1];
                 break;
             case Pattern::LeftLeftRight:
+            default:
                 out.write[0] = mono + fb * read[2];
                 out.write[1] = fb * read[0];
                 out.write[2] = fb * read[1];
