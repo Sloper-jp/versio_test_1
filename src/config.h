@@ -44,7 +44,8 @@ constexpr float kDelayLevelSmoothMs   = 5.f;
 constexpr float kDelayTimeFadeMs      = 20.f;
 constexpr float kDelayRouteFadeMs     = 10.f;
 constexpr float kDelayTimeTolerance   = 0.01f;
-constexpr float kDelayDcCutHz         = 5.f;
+constexpr float kDelayHpfHz           = 200.f; // in the feedback path
+constexpr float kDelayFeedbackMax     = 1.1f;  // above 1 the repeats grow back
 constexpr float kDelayLoopClip        = 0.891f; // -1 dBFS
 
 // Output soft clipper (§3.7): linear below -3 dBFS

@@ -13,6 +13,8 @@
 //     Center:  L -> line 0 -> L,  R -> line 1 -> R  (each feeds itself)
 //     L->R:    mono -> line 0 (L) -> line 1 (R) -> line 0 ...
 //     L->L->R: mono -> line 0 (L) -> line 1 (L) -> line 2 (R) -> line 0 ...
+// Every line input passes a high-pass filter, so low frequencies lose level on
+// each repeat and do not build up, even with feedback above 100%.
 class SendDelay
 {
   public:
@@ -31,7 +33,7 @@ class SendDelay
         float  time_fade_ms;      // crossfade when the delay time changes
         float  route_fade_ms;     // crossfade when the pattern changes
         float  time_tolerance;    // ignore relative changes smaller than this
-        float  dc_cut_hz;
+        float  hpf_hz;
         float  loop_clip;         // soft clip threshold in the feedback path
     };
 
@@ -52,11 +54,21 @@ class SendDelay
         level_coef_ = n <= 1.f ? 1.f : 1.f - expf(-1.f / n);
         time_step_  = FadeStep(cfg.time_fade_ms * ms_to_samples);
         route_step_ = FadeStep(cfg.route_fade_ms * ms_to_samples);
-        dc_r_       = 1.f - 2.f * 3.14159265f * cfg.dc_cut_hz / cfg.sample_rate;
+
+        // 2nd-order Butterworth high-pass (RBJ cookbook, Q = 1/sqrt(2)).
+        const float w0    = 2.f * 3.14159265f * cfg.hpf_hz / cfg.sample_rate;
+        const float cw    = cosf(w0);
+        const float alpha = sinf(w0) / (2.f * 0.70710678f);
+        const float a0    = 1.f + alpha;
+        b0_               = (1.f + cw) / 2.f / a0;
+        b1_               = -(1.f + cw) / a0;
+        b2_               = b0_;
+        a1_               = -2.f * cw / a0;
+        a2_               = (1.f - alpha) / a0;
 
         write_ = 0;
-        for(int ch = 0; ch < 2; ch++)
-            dc_x1_[ch] = dc_y1_[ch] = 0.f;
+        for(int i = 0; i < kNumLines; i++)
+            z1_[i] = z2_[i] = 0.f;
 
         send_target_ = return_target_ = feedback_target_ = 0.f;
         send_ = return_ = feedback_ = 0.f;
@@ -106,8 +118,8 @@ class SendDelay
 
         UpdateDelayTime();
 
-        const float l = DcCut(0, in_l) * send_;
-        const float r = DcCut(1, in_r) * send_;
+        const float l = in_l * send_;
+        const float r = in_r * send_;
 
         float read[kNumLines];
         for(int i = 0; i < kNumLines; i++)
@@ -128,7 +140,8 @@ class SendDelay
         }
 
         for(int i = 0; i < kNumLines; i++)
-            lines_[i][write_] = SoftClip(routed.write[i], cfg_.loop_clip);
+            lines_[i][write_]
+                = SoftClip(HighPass(i, routed.write[i]), cfg_.loop_clip);
 
         *out_l = routed.l * return_;
         *out_r = routed.r * return_;
@@ -210,11 +223,12 @@ class SendDelay
                                : write_ + cfg_.line_len - delay;
     }
 
-    float DcCut(int ch, float x)
+    // Transposed direct form II
+    float HighPass(int i, float x)
     {
-        const float y = x - dc_x1_[ch] + dc_r_ * dc_y1_[ch];
-        dc_x1_[ch]    = x;
-        dc_y1_[ch]    = y;
+        const float y = b0_ * x + z1_[i];
+        z1_[i]        = b1_ * x - a1_ * y + z2_[i];
+        z2_[i]        = b2_ * x - a2_ * y;
         return y;
     }
 
@@ -232,8 +246,9 @@ class SendDelay
     Config   cfg_;
     float*   lines_[kNumLines];
     size_t   write_;
-    float    level_coef_, time_step_, route_step_, dc_r_;
-    float    dc_x1_[2], dc_y1_[2];
+    float    level_coef_, time_step_, route_step_;
+    float    b0_, b1_, b2_, a1_, a2_;
+    float    z1_[kNumLines], z2_[kNumLines];
     float    send_target_, return_target_, feedback_target_;
     float    send_, return_, feedback_;
     uint32_t delay_, old_delay_, requested_delay_;

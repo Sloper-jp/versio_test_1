@@ -92,7 +92,8 @@ void AudioCallback(AudioHandle::InputBuffer  in,
     send_delay.SetReturn(KnobToLevel(hw.GetKnobValue(DaisyVersio::KNOB_5),
                                      config::kDelayKnobDeadZone));
     send_delay.SetFeedback(KnobToFeedback(hw.GetKnobValue(DaisyVersio::KNOB_6),
-                                          config::kDelayKnobDeadZone));
+                                          config::kDelayKnobDeadZone,
+                                          config::kDelayFeedbackMax));
     send_delay.SetDelaySamples(static_cast<uint32_t>(
         static_cast<float>(clock_tracker.Interval()) * DelayIntervals()));
     send_delay.SetPattern(DelayPattern());
@@ -211,7 +212,7 @@ int main(void)
     delay_cfg.time_fade_ms    = config::kDelayTimeFadeMs;
     delay_cfg.route_fade_ms   = config::kDelayRouteFadeMs;
     delay_cfg.time_tolerance  = config::kDelayTimeTolerance;
-    delay_cfg.dc_cut_hz       = config::kDelayDcCutHz;
+    delay_cfg.hpf_hz          = config::kDelayHpfHz;
     delay_cfg.loop_clip       = config::kDelayLoopClip;
     send_delay.Init(delay_cfg, delay_line_0, delay_line_1, delay_line_2);
     send_delay.Snap(config::MsToSamples(config::kClockDefaultIntervalMs));

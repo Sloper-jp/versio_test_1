@@ -569,7 +569,9 @@ struct DelayFixture
     std::vector<float> a, b, c;
     SendDelay          d;
 
-    DelayFixture(float fb, SendDelay::Pattern p, uint32_t delay = 100)
+    // The default high-pass is nearly transparent, so the routing tests can
+    // compare repeat levels directly.
+    DelayFixture(float fb, SendDelay::Pattern p, uint32_t delay = 100, float hpf_hz = 1.f)
     : a(4800), b(4800), c(4800)
     {
         SendDelay::Config cfg;
@@ -579,7 +581,7 @@ struct DelayFixture
         cfg.time_fade_ms    = 20.f;
         cfg.route_fade_ms   = 10.f;
         cfg.time_tolerance  = 0.01f;
-        cfg.dc_cut_hz       = 5.f;
+        cfg.hpf_hz          = hpf_hz;
         cfg.loop_clip       = 0.891f;
         d.Init(cfg, a.data(), b.data(), c.data());
         d.SetSend(1.f);
@@ -659,20 +661,76 @@ static void TestDelayTailSurvivesSendDown()
     CHECK(Near(l[150], 0.4f));
 }
 
-static void TestDelayFullFeedbackHolds()
+// Sends a tone burst and returns the peak of the return in the last 100 ms of
+// a run of `run_ms`. `smooth` uses a 500 ms Hann window so that the burst has no
+// edges: a hard edge contains high frequencies that survive the high-pass.
+static double BurstTailPeak(float fb, float hz, float amp, int run_ms, bool smooth = false)
 {
-    DelayFixture f(1.f, SendDelay::Pattern::LeftRight, 100);
-    std::vector<float> l, r;
-    f.Impulse(0.5f, 0.5f, 48000, l, r);
-    // Repeats do not decay over a second.
-    CHECK(Near(l[100], 0.5f) && Near(r[200], 0.5f));
-    CHECK(Near(l[47900], 0.5f));
+    DelayFixture f(fb, SendDelay::Pattern::Center, 4000, 200.f);
+    const int    n = run_ms * 48;
+    const int    len = smooth ? 24000 : 2400;
+    double       pk = 0;
+    for(int i = 0; i < n; i++)
+    {
+        float x = i < len ? amp * std::sin(2.f * 3.14159265f * hz * i / 48000.f) : 0.f;
+        if(smooth && i < len)
+            x *= 0.5f * (1.f - std::cos(2.f * 3.14159265f * i / len));
+        float l, r;
+        f.d.Process(x, x, &l, &r);
+        if(i >= n - 4800)
+            pk = std::fmax(pk, std::fabs(l));
+    }
+    return pk;
+}
+
+static double Db(double ratio)
+{
+    return 20.0 * std::log10(ratio + 1e-12);
+}
+
+static void TestDelayHighPassResponse()
+{
+    // No feedback: a single pass through the 200 Hz high-pass.
+    const float tones[]    = {100.f, 200.f, 1000.f};
+    const double expects[] = {-12.3, -3.0, 0.0};
+    for(int t = 0; t < 3; t++)
+    {
+        DelayFixture f(0.f, SendDelay::Pattern::Center, 100, 200.f);
+        double       pk = 0;
+        for(int i = 0; i < 48000; i++)
+        {
+            const float x = 0.5f * std::sin(2.f * 3.14159265f * tones[t] * i / 48000.f);
+            float       l, r;
+            f.d.Process(x, x, &l, &r);
+            if(i > 24000)
+                pk = std::fmax(pk, std::fabs(l));
+        }
+        CHECK(std::fabs(Db(pk / 0.5) - expects[t]) < 0.3);
+    }
+}
+
+static void TestDelayFullFeedbackKeepsHighsOnly()
+{
+    // 2 s at 100% (24 repeats): 1 kHz stays, 100 Hz is gone.
+    CHECK(Db(BurstTailPeak(1.f, 1000.f, 0.25f, 2000) / 0.25) > -1.0);
+    CHECK(Db(BurstTailPeak(1.f, 100.f, 0.25f, 2000, true) / 0.25) < -80.0);
+}
+
+static void TestDelayFeedbackAbove100Recovers()
+{
+    // 110%: a faded 1 kHz burst grows back up to the loop clipper...
+    const double early = BurstTailPeak(1.1f, 1000.f, 0.02f, 500);
+    const double late  = BurstTailPeak(1.1f, 1000.f, 0.02f, 8000);
+    CHECK(late > early * 5.0);
+    CHECK(late > 0.9 && late <= 1.0);
+    // ...while 100 Hz still dies away.
+    CHECK(Db(BurstTailPeak(1.1f, 100.f, 0.25f, 2000, true) / 0.25) < -60.0);
 }
 
 static void TestDelayFullFeedbackStaysBounded()
 {
-    DelayFixture f(1.f, SendDelay::Pattern::Center, 100);
-    auto         x  = Noise(48000);
+    DelayFixture f(1.1f, SendDelay::Pattern::Center, 100, 200.f);
+    auto         x  = Noise(96000);
     double       pk = 0;
     for(float v : x)
     {
@@ -685,18 +743,18 @@ static void TestDelayFullFeedbackStaysBounded()
 
 static void TestDelayDcDoesNotAccumulate()
 {
-    DelayFixture f(1.f, SendDelay::Pattern::Center, 4000);
+    // A smoothly rising constant offset never reaches the repeats.
+    DelayFixture f(1.f, SendDelay::Pattern::Center, 4000, 200.f);
     float        l = 0, r = 0;
-    // Constant input: only the first moments get through the DC cut, so the
-    // loop stays far below the clipper instead of integrating up to it.
-    double peak_late = 0;
+    double       peak_late = 0;
     for(int n = 0; n < 480000; n++)
     {
-        f.d.Process(0.05f, 0.05f, &l, &r);
+        const float rise = n < 24000 ? 0.5f * (1.f - std::cos(3.14159265f * n / 24000.f)) : 1.f;
+        f.d.Process(0.05f * rise, 0.05f * rise, &l, &r);
         if(n > 470000)
             peak_late = std::fmax(peak_late, std::fabs(l));
     }
-    CHECK(peak_late < 0.06);
+    CHECK(peak_late < 0.001);
 }
 
 static void TestDelayTimeChange()
@@ -748,9 +806,10 @@ static void TestDelayKnobs()
     CHECK(KnobToLevel(0.02f, 0.02f) == 0.f);
     CHECK(Near(KnobToLevel(0.5f, 0.02f), 0.25f, 1e-6f)); // -12 dB
     CHECK(KnobToLevel(1.f, 0.02f) == 1.f);
-    CHECK(KnobToFeedback(0.01f, 0.02f) == 0.f);
-    CHECK(KnobToFeedback(0.99f, 0.02f) == 1.f);
-    CHECK(Near(KnobToFeedback(0.5f, 0.02f), 0.5f, 1e-6f));
+    CHECK(KnobToFeedback(0.01f, 0.02f, 1.1f) == 0.f);
+    CHECK(KnobToFeedback(0.99f, 0.02f, 1.1f) == 1.1f);
+    CHECK(Near(KnobToFeedback(0.5f, 0.02f, 1.1f), 0.55f, 1e-5f));
+    CHECK(Near(KnobToFeedback(0.8927f, 0.02f, 1.1f), 1.f, 1e-3f)); // 100% point
 }
 
 // ------------------------------------------------------------- controls ---
@@ -826,7 +885,9 @@ int main()
     TestDelayLeftLeftRight();
     TestDelayNoFeedbackSingleRepeat();
     TestDelayTailSurvivesSendDown();
-    TestDelayFullFeedbackHolds();
+    TestDelayHighPassResponse();
+    TestDelayFullFeedbackKeepsHighsOnly();
+    TestDelayFeedbackAbove100Recovers();
     TestDelayFullFeedbackStaysBounded();
     TestDelayDcDoesNotAccumulate();
     TestDelayTimeChange();

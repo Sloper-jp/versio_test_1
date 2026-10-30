@@ -61,14 +61,14 @@ inline float KnobToLevel(float v, float dead_zone)
     return v * v;
 }
 
-// Knob 0..1 -> feedback, reaching exactly 0 and 1 at both ends.
-inline float KnobToFeedback(float v, float dead_zone)
+// Knob 0..1 -> feedback, reaching exactly 0 and max_fb at both ends.
+inline float KnobToFeedback(float v, float dead_zone, float max_fb)
 {
     if(v <= dead_zone)
         return 0.f;
     if(v >= 1.f - dead_zone)
-        return 1.f;
-    return (v - dead_zone) / (1.f - 2.f * dead_zone);
+        return max_fb;
+    return max_fb * (v - dead_zone) / (1.f - 2.f * dead_zone);
 }
 
 // Dry/wet selector with a short linear fade so the switch does not click.
